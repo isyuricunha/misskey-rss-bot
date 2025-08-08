@@ -1,4 +1,3 @@
-````md
 # Misskey RSS Bot
 
 A Python bot that monitors RSS feeds and automatically posts new articles to your **Misskey** server.
