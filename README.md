@@ -1,72 +1,85 @@
-# Misskey RSS Bot
+# misskey rss bot
 
-A Python bot that monitors RSS feeds and automatically posts new articles to your **Misskey** server.
+a small python bot that watches rss/atom feeds and posts new items to a misskey instance.
 
-## Features
-- Monitors multiple RSS/Atom feeds in real-time
-- Prevents duplicate posts using an SQLite database
-- Limits post length to avoid truncation
-- Automatically formats and cleans HTML content
-- Handles Misskey API rate limits gracefully
+it’s simple on purpose: one script, a tiny sqlite db to avoid duplicates, and a couple of knobs you can tune in `bot.py`.
 
-## Requirements
-- Python 3.8+
-- Dependencies listed in `requirements.txt`
+## what it does
 
-Install dependencies with:
+- monitors multiple feeds defined in `FEEDS`
+- converts html to plain text using `html2text`
+- truncates long posts to `MAX_POST_LENGTH`
+- skips items already posted (hash stored in sqlite `posted_hashes.db`)
+- handles http 429 from misskey with a cooldown and retries
+
+## requirements
+
+- python 3.8+
+- packages in `requirements.txt`
+
+install deps:
+
 ```bash
 pip install -r requirements.txt
-````
+```
 
-## Configuration
+## configuration (edit `bot.py`)
 
-Edit the `bot.py` file to set your Misskey instance URL and API token:
+set your misskey url and api token:
 
 ```python
 MISSKEY_INSTANCE = "https://your.misskey.domain"
-MISSKEY_TOKEN = "YOUR_API_TOKEN"
+MISSKEY_TOKEN = "your_api_token"
 ```
 
-Modify the list of RSS feeds in the `FEEDS` array to add or remove sources:
+define feeds:
 
 ```python
 FEEDS = [
     "https://hnrss.org/frontpage",
     "https://www.theverge.com/rss/index.xml",
-    # Add your preferred feeds here
+    # add your feeds here
 ]
 ```
 
-##  How to Run
+tune timings and limits if you want:
 
-Run the bot with:
+```python
+CHECK_INTERVAL = 300   # seconds between full checks
+POST_DELAY = 5         # delay between posts
+COOLDOWN_DELAY = 60    # wait after http 429
+MAX_POST_LENGTH = 3000 # max characters per post
+```
+
+notes:
+
+- the script currently builds posts in `format_post()` with a title, cleaned summary/content, and the link. if you don’t want any decorations, edit that function accordingly.
+- keep your api token private. don’t commit your token.
+
+## how to run
 
 ```bash
 python bot.py
 ```
 
-The bot will:
+the loop is straightforward:
 
-1. Fetch all configured RSS feeds
-2. Detect new articles not previously posted
-3. Post new articles to your Misskey instance
-4. Wait for the configured interval before repeating
+1. parse each feed with `feedparser`
+2. compute a sha256 from title+link(+summary)
+3. skip if the hash exists in sqlite
+4. format text and call `POST /api/notes/create` on misskey
+5. wait `POST_DELAY` and continue
+6. sleep `CHECK_INTERVAL` and repeat
 
-## Running Continuously
+the sqlite db file is created automatically as `posted_hashes.db` in the project root.
 
-To keep the bot running 24/7 on a Linux server, create a `systemd` service:
+## run it 24/7 (linux)
 
-### Create the service file:
-
-```bash
-sudo nano /etc/systemd/system/misskeyrssbot.service
-```
-
-### Paste the following content (update paths and username):
+systemd unit example (adjust paths/users):
 
 ```ini
 [Unit]
-Description=Misskey RSS Bot
+Description=misskey rss bot
 After=network.target
 
 [Service]
@@ -79,48 +92,55 @@ Restart=always
 WantedBy=multi-user.target
 ```
 
-### Enable and start the service:
+enable + start:
 
 ```bash
 sudo systemctl enable misskeyrssbot
 sudo systemctl start misskeyrssbot
 ```
 
-### Check status:
+## run it on windows
 
-```bash
-sudo systemctl status misskeyrssbot
-```
+- simplest path: keep a terminal open and run `python bot.py`
+- if you want it as a service, use something like nssm to wrap the script, or schedule it via task scheduler (run at startup, keep running on failure)
 
-## Project Structure
+## project layout
 
 ```
 misskey-rss-bot/
-├── bot.py              # Main bot script
-├── requirements.txt    # Python dependencies
-└── README.md           # This documentation
+├── bot.py              # main script
+├── requirements.txt    # python deps
+└── README.md           # this file
 ```
 
-## License
+## customization
 
-MIT License (or replace with your preferred license).
+- change post format: edit `format_post()` in `bot.py`
+- change dedup logic: edit `hash_entry()` (currently title+link+summary sha256)
+- change storage: update `init_db()/has_posted()/mark_posted()` if you want a different db
+- timeouts/retries: see `post_to_misskey()` (requests timeout=10, cooldown on 429)
 
----
+## troubleshooting
 
-## Configuration Parameters (in `bot.py`)
+- nothing posts
+  - check `MISSKEY_INSTANCE` and `MISSKEY_TOKEN`
+  - verify your token has permission to create notes
+  - try a minimal feed you trust (e.g. `https://hnrss.org/frontpage`)
 
-| Variable           | Description                                  | Default Value                                                         |
-| ------------------ | -------------------------------------------- | --------------------------------------------------------------------- |
-| `MISSKEY_INSTANCE` | URL of your Misskey server                   | e.g. [https://misskey.yourdomain.com](https://misskey.yourdomain.com) |
-| `MISSKEY_TOKEN`    | Your Misskey API token                       | Your token string                                                     |
-| `FEEDS`            | List of RSS feed URLs to monitor             | See default list                                                      |
-| `CHECK_INTERVAL`   | Seconds between feed checks                  | 300 (5 minutes)                                                       |
-| `POST_DELAY`       | Seconds delay between posting each article   | 5                                                                     |
-| `COOLDOWN_DELAY`   | Seconds to wait after hitting API rate limit | 60                                                                    |
-| `MAX_POST_LENGTH`  | Maximum characters allowed in a post         | 3000                                                                  |
+- rate limit / 429
+  - the bot waits `COOLDOWN_DELAY` seconds and tries later. you can raise the delay or lower `POST_DELAY`
 
----
+- duplicates show up
+  - `posted_hashes.db` stores a hash per item. if feeds change titles/summaries after publish, hashes may differ. you can adjust `hash_entry()` to be stricter (e.g., only link) or looser
 
-If you encounter issues or want to contribute, feel free to open an issue or pull request.
+- formatting looks weird
+  - `html2text` strips html and links/images by default. tweak `clean_html()` to include links or adjust width
 
-Happy posting, or feeding, idk!
+## security
+
+- don’t commit your real token to git
+- if you need env-based config, wire `os.environ.get()` into `bot.py` (the current code reads constants only)
+
+## license
+
+this project is under the mit license. see `LICENSE`.
